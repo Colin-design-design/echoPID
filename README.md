@@ -11,6 +11,4 @@ EchoPID is a proportional–integral–derivative (PID) inspired **external** co
 - `results/` — CSV logs (selected)
 - `paper/` — LaTeX (`.tex`) and compiled PDF
 
-## Install
-```bash
-pip install -r requirements.txt
+
