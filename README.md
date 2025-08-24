@@ -1,9 +1,6 @@
-# EchoPID: A Feedback Controller for Stabilizing LLM Stances
+# EchoPID: A (single-call) Feedback Controller for Stabilizing LLM Stances (Tested with GPT-5)
 
-EchoPID is a proportional–integral–derivative (PID) inspired **external** controller for large language models that:
-- Reduces **unjustified flips** (0 with refined, persistence-based metrics)
-- Suppresses **stance variance**
-- Preserves **domain richness** (evidence breadth)
+EchoPID is a single-call alignment controller for large language models that doesn't require changing model weights. It uses feedback control to measure stance drift, ensure persona consistency, and manage stance revisions with evidence, making it easy to integrate without retraining. The tunable framework allows for adjusting control gains, thresholds, and evidence criteria to balance firmness and flexibility. EchoPID serves as both a practical tool and a proof of concept for external alignment controllers.
 
 ## Results (Baseline Configuration)
 
