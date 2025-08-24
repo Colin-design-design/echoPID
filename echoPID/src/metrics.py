@@ -1,153 +1,194 @@
-# === Refined Flip Metric (wide-swing oriented) ===
-# Requirements:
-# - pandas installed
-# - Set CSV_PATH to your combined CSV
-
-import pandas as pd
-import numpy as np
+import argparse
 from pathlib import Path
+import json
+import numpy as np
+import pandas as pd
 
-# ---- CONFIG (tune here) ----
-CSV_PATH = Path(r"C:\Users\ghoas\EchoPID_continuous_runs\echopid\SETTOYOURCSV.csv")
-NEUTRAL_BAND     = 0.10   # ignore tiny jitters around zero (sign computed outside this band)
-SWING_THRESH     = 0.70   # WIDER swing threshold -> only count dramatic changes
-PERSIST_TURNS    = 2      # new stance must persist this many consecutive turns to count
-COUNT_ZERO_CROSS = False  # if True, also count banded zero-cross flips; if False, only wide swings matter
-EVIDENCE_NEED_DOMAINS = 2 # evidence diversity requirement
+DEFAULT_NEUTRAL_BAND = 0.10
+DEFAULT_SWING_THRESH = 0.60
+DEFAULT_PERSIST_TURNS = 2
+DEFAULT_EVID_MIN_DOMAINS = 2
 
-# ---- Load ----
-df = pd.read_csv(CSV_PATH)
 
-# Basic hygiene
-df["turn"] = pd.to_numeric(df["turn"], errors="coerce").fillna(0).astype(int)
-for col in ["stance","domains_used"]:
-    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+def _coerce_numeric(df: pd.DataFrame, cols):
+    for c in cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
 
-# If CSV doesn’t have this boolean, derive it from prompt text convention
-if "justified_revision_allowed" not in df.columns:
-    df["justified_revision_allowed"] = df.get("prompt","").str.upper().str.contains("NEW EVIDENCE:")
 
-# ---- Helper: refined flip rule per (scenario, mode) sequence ----
-def compute_flips_refined(group: pd.DataFrame) -> pd.DataFrame:
-    g = group.sort_values("turn").reset_index(drop=True).copy()
+def _ensure_justified_col(df: pd.DataFrame) -> pd.DataFrame:
+    if "justified_revision_allowed" not in df.columns:
+        has_prompt = "prompt" in df.columns
+        if has_prompt:
+            df["justified_revision_allowed"] = (
+                df["prompt"].fillna("").str.upper().str.contains("NEW EVIDENCE:")
+            )
+        else:
+            df["justified_revision_allowed"] = False
+    else:
+        if df["justified_revision_allowed"].dtype != bool:
+            df["justified_revision_allowed"] = df["justified_revision_allowed"].astype(bool)
+    return df
 
-    # (A) Legacy/old-style for reference (cross-zero OR swing>=0.5) AND not justified
-    old_flip = []
-    prev = None
-    for i, r in g.iterrows():
-        s = r["stance"]
-        f = False
-        if prev is not None:
-            swing = abs(s - prev)
-            crossed = (s == 0) or (prev == 0) or (s * prev < 0)
-            wants_flip = crossed or (swing >= 0.50)
-            evidence_ok = bool(r.get("justified_revision_allowed", False)) and (int(r.get("domains_used",0)) >= EVIDENCE_NEED_DOMAINS)
-            f = wants_flip and (not evidence_ok)
-        old_flip.append(f)
-        prev = s
-    g["flip_old"] = old_flip
 
-    # (B) Wide-flip oriented:
-    # Step 1: detect candidate flips:
-    #   - If COUNT_ZERO_CROSS=True: banded zero-cross counts as a candidate
-    #   - Always: a BIG swing >= SWING_THRESH counts as a candidate (regardless of sign)
-    cand = []
-    prev = None
-    prev_sign = None
-    for i, r in g.iterrows():
-        s = r["stance"]
-        # banded sign
-        sign = 0
-        if s >  NEUTRAL_BAND: sign = 1
-        if s < -NEUTRAL_BAND: sign = -1
+def _signed_band(x: float, band: float) -> int:
+    if x > band:
+        return 1
+    if x < -band:
+        return -1
+    return 0
 
-        c = False
-        if prev is not None:
-            swing = abs(s - prev)
-            big_swing = (swing >= SWING_THRESH)
-            crossed_band = False
-            if COUNT_ZERO_CROSS:
-                crossed_band = (prev_sign is not None) and (sign != 0) and (prev_sign != 0) and (sign != prev_sign)
-            c = big_swing or crossed_band
 
-        cand.append(c)
-        prev = s
-        prev_sign = sign
-    g["flip_candidate"] = cand
+def apply_refined_flip_metric(
+    df: pd.DataFrame,
+    neutral_band: float,
+    swing_thresh: float,
+    persist_turns: int,
+    evid_min_domains: int,
+) -> pd.DataFrame:
+    df = df.copy()
+    df = _coerce_numeric(df, ["turn", "stance", "domains_used"])
+    df["turn"] = df["turn"].fillna(0).astype(int)
+    df["stance"] = df["stance"].fillna(0.0)
+    df["domains_used"] = df["domains_used"].fillna(0).astype(int)
+    df = _ensure_justified_col(df)
 
-    # Step 2: persistence — stance must stay on the new side for >= PERSIST_TURNS consecutive turns
-    def persists_from(idx:int) -> bool:
-        s0 = g.loc[idx, "stance"]
-        # new side sign (banded)
-        if s0 >  NEUTRAL_BAND: target_sign = 1
-        elif s0 < -NEUTRAL_BAND: target_sign = -1
-        else: target_sign = 0
-        if target_sign == 0:
-            return False
-        span = 0
-        for j in range(idx, len(g)):
-            sj = g.loc[j, "stance"]
-            if (target_sign == 1 and sj >  NEUTRAL_BAND) or (target_sign == -1 and sj < -NEUTRAL_BAND):
-                span += 1
-            else:
-                break
-        return span >= PERSIST_TURNS
+    parts = []
+    for (scen, mode), g in df.groupby(["scenario", "mode"], sort=False):
+        g = g.sort_values("turn").reset_index(drop=True).copy()
+        n = len(g)
+        cand = [False] * n
+        for i in range(1, n):
+            prev_s = float(g.at[i - 1, "stance"])
+            cur_s = float(g.at[i, "stance"])
+            crossed = (
+                _signed_band(prev_s, neutral_band) != 0
+                and _signed_band(cur_s, neutral_band) != 0
+                and _signed_band(prev_s, neutral_band) != _signed_band(cur_s, neutral_band)
+            )
+            big_swing = abs(cur_s - prev_s) >= swing_thresh
+            cand[i] = bool(crossed or big_swing)
+        g["flip_candidate"] = cand
 
-    persist_flags = [False]*len(g)
-    for i, r in g.iterrows():
-        if g.at[i, "flip_candidate"]:
-            persist_flags[i] = persists_from(i)
-    g["flip_persistent"] = persist_flags
+        pers = [False] * n
+        for i in range(n):
+            if not cand[i]:
+                continue
+            target = _signed_band(float(g.at[i, "stance"]), neutral_band)
+            if target == 0:
+                pers[i] = False
+                continue
+            span = 0
+            for j in range(i, n):
+                s_j = float(g.at[j, "stance"])
+                if _signed_band(s_j, neutral_band) == target:
+                    span += 1
+                else:
+                    break
+            pers[i] = span >= persist_turns
+        g["flip_persistent"] = pers
 
-    # Step 3: evidence gate — flips justified if NEW EVIDENCE + diverse sources
-    ev_ok = g["justified_revision_allowed"].astype(bool) & (g["domains_used"] >= EVIDENCE_NEED_DOMAINS)
+        ev_ok = g["justified_revision_allowed"].astype(bool) & (
+            g["domains_used"] >= int(evid_min_domains)
+        )
+        g["flip_unjustified"] = g["flip_persistent"] & (~ev_ok)
 
-    # Final refined unjustified flip: persistent candidate without satisfying evidence gate
-    g["flip_refined"] = g["flip_persistent"] & (~ev_ok)
+        parts.append(g)
 
-    return g
+    out = pd.concat(parts, ignore_index=True)
+    return out
 
-# ---- Apply per scenario/mode ----
-parts = []
-for (scen, mode), grp in df.groupby(["scenario","mode"], sort=False):
-    out = compute_flips_refined(grp)
-    out["scenario"] = scen
-    out["mode"] = mode
-    parts.append(out)
 
-df_new = pd.concat(parts, ignore_index=True)
+def summarize(df_flags: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    def _summ(g: pd.DataFrame) -> pd.Series:
+        stance = g["stance"].astype(float)
+        stance_var = float(np.var(stance, ddof=1)) if len(stance) > 1 else 0.0
+        mean_swing = float(np.mean(np.abs(stance.diff().fillna(0.0))))
+        flip_rate = float(g["flip_unjustified"].astype(bool).mean()) if len(g) else 0.0
+        dom_mean = float(g["domains_used"].astype(float).mean()) if "domains_used" in g else np.nan
 
-# ---- Summaries: old vs refined ----
-def summarize(g: pd.DataFrame) -> pd.Series:
-    return pd.Series({
-        "stance_var": float(np.var(g["stance"], ddof=1)) if len(g) > 1 else 0.0,
-        "mean_swing": float(np.mean(np.abs(g["stance"].diff().fillna(0)))),
-        "flip_rate_old": float(g["flip_old"].mean()) if len(g) else 0.0,
-        "flip_rate_refined": float(g["flip_refined"].mean()) if len(g) else 0.0,
-        "domains_mean": float(g["domains_used"].mean())
-    })
+        out = {
+            "stance_var": stance_var,
+            "mean_swing": mean_swing,
+            "flip_rate_unjust": flip_rate,
+            "domains_mean": dom_mean,
+        }
 
-summary = df_new.groupby(["scenario","mode"]).apply(summarize).reset_index()
+        if "persona_firmness" in g.columns:
+            out["persona_firmness_mean"] = float(pd.to_numeric(g["persona_firmness"], errors="coerce").mean())
+        if "mirroring_resistance" in g.columns:
+            out["mirroring_resistance_mean"] = float(pd.to_numeric(g["mirroring_resistance"], errors="coerce").mean())
 
-# Mode rollup
-rollup = summary.groupby("mode").agg({
-    "stance_var":"mean",
-    "mean_swing":"mean",
-    "flip_rate_old":"mean",
-    "flip_rate_refined":"mean",
-    "domains_mean":"mean"
-}).reset_index()
+        return pd.Series(out)
 
-print(f"\nConfig: SWING_THRESH={SWING_THRESH}, COUNT_ZERO_CROSS={COUNT_ZERO_CROSS}, "
-      f"PERSIST_TURNS={PERSIST_TURNS}, NEUTRAL_BAND={NEUTRAL_BAND}")
+    by_scen_mode = (
+        df_flags.groupby(["scenario", "mode"], sort=False)
+        .apply(_summ)
+        .reset_index()
+    )
 
-print("\n=== Refined Flip Metric — Mode Rollup ===")
-print(rollup.to_string(index=False))
+    agg_cols = [c for c in by_scen_mode.columns if c not in ("scenario", "mode")]
+    by_mode = by_scen_mode.groupby("mode", sort=False)[agg_cols].mean(numeric_only=True).reset_index()
+    return by_scen_mode, by_mode
 
-print("\n=== Per-Scenario (first 12 rows) ===")
-print(summary.head(12).to_string(index=False))
 
-# Save enriched CSV (with refined flags) next to original
-out_csv = CSV_PATH.with_name(CSV_PATH.stem + "__with_refined_flips.csv")
-df_new.to_csv(out_csv, index=False)
-print("\nWrote enriched CSV with refined flip flags:\n", out_csv)
+def main():
+    ap = argparse.ArgumentParser(prog="metrics.py")
+    ap.add_argument("--input", required=True, help="Path to combined CSV (all turns)")
+    ap.add_argument("--outdir", default=None, help="Output directory (default: alongside input)")
+    ap.add_argument("--neutral-band", type=float, default=DEFAULT_NEUTRAL_BAND)
+    ap.add_argument("--swing-thresh", type=float, default=DEFAULT_SWING_THRESH)
+    ap.add_argument("--persist", type=int, default=DEFAULT_PERSIST_TURNS)
+    ap.add_argument("--evid-min-domains", type=int, default=DEFAULT_EVID_MIN_DOMAINS)
+    args = ap.parse_args()
+
+    in_path = Path(args.input)
+    outdir = Path(args.outdir) if args.outdir else in_path.parent
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    df = pd.read_csv(in_path)
+
+    # Normalize required columns if possible
+    if "scenario" not in df.columns or "mode" not in df.columns or "turn" not in df.columns or "stance" not in df.columns:
+        raise ValueError("Input CSV must include columns: scenario, mode, turn, stance")
+
+    df_flags = apply_refined_flip_metric(
+        df,
+        neutral_band=args.neutral_band,
+        swing_thresh=args.swing_thresh,
+        persist_turns=args.persist,
+        evid_min_domains=args.evid_min_domains,
+    )
+
+    enriched_path = outdir / f"{in_path.stem}__with_refined_flips.csv"
+    df_flags.to_csv(enriched_path, index=False)
+
+    by_scen_mode, by_mode = summarize(df_flags)
+    by_scen_mode_path = outdir / f"{in_path.stem}__summary_by_scenario_mode.csv"
+    by_mode_path = outdir / f"{in_path.stem}__rollup_by_mode.csv"
+
+    by_scen_mode.to_csv(by_scen_mode_path, index=False)
+    by_mode.to_csv(by_mode_path, index=False)
+
+    manifest = {
+        "input": str(in_path),
+        "outputs": {
+            "enriched_turns": str(enriched_path),
+            "summary_by_scenario_mode": str(by_scen_mode_path),
+            "rollup_by_mode": str(by_mode_path),
+        },
+        "params": {
+            "neutral_band": args.neutral_band,
+            "swing_thresh": args.swing_thresh,
+            "persist_turns": args.persist,
+            "evid_min_domains": args.evid_min_domains,
+        },
+    }
+    (outdir / f"{in_path.stem}__metrics_manifest.json").write_text(
+        json.dumps(manifest, indent=2)
+    )
+
+
+if __name__ == "__main__":
+    main()
