@@ -1,5 +1,3 @@
- #runner that works with controller 
-
 import json, csv, os
 from pathlib import Path
 from textwrap import shorten
@@ -17,22 +15,22 @@ SCENARIOS_JSON = r'''
 }
 '''
 
-# 2) Load and validate
+
 scenarios = json.loads(SCENARIOS_JSON)
 assert isinstance(scenarios, dict) and scenarios, "SCENARIOS_JSON must be a non-empty JSON object"
 for k, v in scenarios.items():
     assert isinstance(v, list) and len(v) >= 2, f"Scenario '{k}' must be a list of >=2 turns"
 
-# Optional: sanity print
+
 print("Loaded scenarios:")
 for k in sorted(scenarios.keys()):
     print(f" - {k}: {len(scenarios[k])} turns")
 
-# 3) Make them available both as variables and as the dict your runner expects
+# dict your runner expects
 globals().update(scenarios)
 all_hard_scenarios = scenarios
 
-# 4) Robust runner (OFF, ABLATE, ON) that APPENDS rows and doesn’t bail after t01
+
 OUT = Path(os.getenv("ECHO_OUT", r"..\...\...\........."))
 OUT.mkdir(parents=True, exist_ok=True)
 ALL_ROWS = []
@@ -92,7 +90,7 @@ def run_scenario(name, turns, model_name="gpt-5"):
 
             print(f"[{name} t{t_idx:02d} | {mode}] stance={r['stance']:+.2f} dom={r['domains_used']} flip_no_evid={r['flip_wo_evidence']}")
 
-        # Flush CSV incrementally (so partial runs are still captured)
+       
         csv_path = OUT / f"echo_pid_continuous__gpt-5.csv"
         hdr = list(rows[0].keys())
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
@@ -103,7 +101,7 @@ def run_scenario(name, turns, model_name="gpt-5"):
         print("Flushed CSV:", csv_path)
     return rows
 
-# 5) Run all scenarios
+
 results_hard = {}
 for name, turns in all_hard_scenarios.items():
     print(f"\n=== Running {name} ===")
@@ -112,4 +110,5 @@ for name, turns in all_hard_scenarios.items():
 
 print("\nTotal rows:", len(ALL_ROWS))
 print("Outputs saved under:", OUT)
+
 
