@@ -19,5 +19,4 @@ These results point to EchoPID as a proof-of-concept external controller for sta
 - `paper/` — LaTeX (`.tex`) and compiled PDF
 
 
-## Whitepaper
-Full technical details are available in the [EchoPID Whitepaper](paper/echopid_whitepaper.pdf).
+
