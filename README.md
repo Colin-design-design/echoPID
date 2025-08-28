@@ -13,10 +13,9 @@ Using tuned thresholds (ε=0.10, swing=0.6, persist=2, Dmin=2) and fixed gains (
 These results point to EchoPID as a proof-of-concept external controller for stabilizing multi-turn LLM stance trajectories.
 
 ## Repo Layout
-- `src/` — controller + metrics + runner
-- `scenarios/` — adversarial multi-turn scripts
-- `results/` — CSV logs (selected)
-- `paper/` — LaTeX (`.tex`) and compiled PDF
+- `src/` — controller + runner + metrics
+- `results/` — CSV logs 
+
 
 
 
